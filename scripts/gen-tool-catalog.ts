@@ -48,6 +48,7 @@ import * as ToolCordis from '@deepseek-ai/dsh-tool-cordis'
 import * as ToolFs from '@deepseek-ai/dsh-tool-fs'
 import * as ToolFsSearch from '@deepseek-ai/dsh-tool-fs-search'
 import * as ToolStrReplaceEditor from '@deepseek-ai/dsh-tool-str-replace-editor'
+import * as ToolEnvironment from '@deepseek-ai/dsh-tool-environment'
 import TerminalSessionService from '@deepseek-ai/dsh-terminal'
 import * as ToolPty from '@deepseek-ai/dsh-tool-terminal'
 import * as ToolGoal from '@deepseek-ai/dsh-tool-goal'
@@ -266,6 +267,18 @@ const TOOL_PACKAGES: ToolPackage[] = [
     },
     note:
       'Not in any shipped tree (a deliberate opt-in — dynamic package code reaches the real runtime, see .agents/notes/implemented/feature/2026-07-08-self-referential-cordis-toolset.md). The toolset injects `ctx.dynamicCordisRunner` from `@deepseek-ai/dsh-cordis-host-runner`, which owns the definition registry and the vm sandbox; a composition missing it never activates the tools. A running package may register ADDITIONAL model-visible tools until it is stopped, undefined, or DSH restarts; a full changed request header logs those tool-set changes.',
+  },
+  {
+    pkg: '@deepseek-ai/dsh-tool-environment',
+    dir: 'tool-environment',
+    source: 'packages/context/tool-environment/src/index.ts',
+    requires: ['ctx.tools', 'ctx.systemPrompt'],
+    writes: ['tool/call', 'tool/result'],
+    async mount(ctx) {
+      await ctx.plugin(ToolEnvironment)
+    },
+    note:
+      'environment_info reports the host runtime — cwd, platform, OS name/release, architecture, hostname, username, home directory, shell, and Node version — plus a small allowlist of environment variables. The allowlist is a deployment choice (Config.environmentVariables) with a safe default, so nothing secret is reported unless a deployment names it; absent names are null so the model can tell "unset" from an empty string.',
   },
   {
     pkg: '@deepseek-ai/dsh-tool-bash-persistent',
