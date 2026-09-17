@@ -204,6 +204,32 @@ export function catalogModels(provider: string): Map<string, Model<Api>> {
 }
 
 /**
+ * The endpoint a set of models is served from, per wire protocol.
+ *
+ * A protocol whose models name different endpoints has no single endpoint and
+ * is absent from the map: "this route's endpoint" is only a question while
+ * there is exactly one to ask. That is how a route pi-ai stores per model
+ * rather than per provider answers — Bedrock's regional endpoints — so the
+ * caller picks the protocol and the endpoint follows from it.
+ * @param models - the models one route serves.
+ * @returns endpoints by wire protocol; a protocol whose models disagree is absent.
+ */
+export function modelEndpoints(models: Iterable<Model<Api>>): ReadonlyMap<string, string> {
+  const byApi = new Map<string, Set<string>>()
+  for (const model of models) {
+    const endpoints = byApi.get(model.api) ?? new Set<string>()
+    endpoints.add(model.baseUrl)
+    byApi.set(model.api, endpoints)
+  }
+  const resolved = new Map<string, string>()
+  for (const [api, endpoints] of byApi) {
+    if (endpoints.size > 1) continue
+    for (const endpoint of endpoints) resolved.set(api, endpoint)
+  }
+  return resolved
+}
+
+/**
  * Selectable reasoning efforts for one model: each key is a level the model
  * offers (and selectors show), and its value is the wire spelling dispatch
  * sends for it. `off` alone may leave its value empty — "supported, send

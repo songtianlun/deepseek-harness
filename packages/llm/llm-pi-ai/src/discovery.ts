@@ -2,11 +2,16 @@
  * Answering "which models can this provider serve?" for the configuration
  * surface's "fetch available models" action.
  *
- * A route the installed pi-ai catalog ships is answered **from that catalog**,
- * with no network call at all: pi-ai's registry is the authoritative list for
- * its own providers, and it carries the capacities a listing endpoint would
- * not disclose. Only a route the catalog does not describe — a gateway, a
- * self-hosted server — is interrogated over the wire.
+ * A route the installed pi-ai catalog ships is answered from that catalog
+ * first: pi-ai's registry carries the capacities a listing endpoint does not
+ * disclose. Its answer is then widened by the route's own endpoint, because
+ * the catalog is a snapshot taken when pi-ai was published and the provider
+ * keeps releasing models into a route that already exists. An endpoint fault
+ * of any kind leaves the catalog answer standing, since that answer is
+ * already complete on its own.
+ *
+ * Only a route the catalog does not describe — a gateway, a self-hosted
+ * server — depends on the interrogation for its answer.
  *
  * Neither path is a catalog refresh. Nothing here is stored: the request
  * carries a draft the user is still editing, and the reply is candidate
@@ -28,19 +33,27 @@ import { attributionHeaders } from '@deepseek-ai/dsh-llm'
 import { catalogModels } from './catalog.ts'
 
 /**
- * Protocols whose model listing this module can read. OpenAI protocols use
- * bearer auth at `GET {baseURL}/models`; Anthropic Messages uses `x-api-key`
- * and `anthropic-version` at its native `GET /v1/models`. Azure is absent
- * despite its OpenAI lineage — it authenticates with an `api-key` header and
- * requires an `api-version` query — and Codex authenticates through OAuth;
- * guessing at either would report an authentication failure as a provider
- * with no models. pi-ai's remaining protocols are absent for the same reason.
+ * Protocols whose model listing this module can read, most preferred first.
+ * OpenAI protocols use bearer auth at `GET {baseURL}/models`; Anthropic
+ * Messages uses `x-api-key` and `anthropic-version` at its native
+ * `GET /v1/models`. Azure is absent despite its OpenAI lineage — it
+ * authenticates with an `api-key` header and requires an `api-version` query —
+ * and Codex authenticates through OAuth; guessing at either would report an
+ * authentication failure as a provider with no models. pi-ai's remaining
+ * protocols are absent for the same reason.
+ *
+ * The order is also the preference for asking a catalog route's own endpoint.
+ * A route whose models speak several protocols is asked through the one whose
+ * listing path is the most widely published — `openai-completions` and
+ * `openai-responses` share `GET {baseURL}/models` — rather than through
+ * whichever protocol the catalog happens to list first, so a mixed route is
+ * not interrogated through a contract its gateway may not implement.
  */
-const LISTABLE_PROTOCOLS: ReadonlySet<string> = new Set([
-  'anthropic-messages',
+export const LISTING_PROTOCOLS: readonly string[] = [
   'openai-completions',
   'openai-responses',
-])
+  'anthropic-messages',
+]
 
 /** Stable API version required by Anthropic's model-listing endpoint. */
 const ANTHROPIC_VERSION = '2023-06-01'
@@ -252,64 +265,131 @@ function usableProbeKey(raw: string): string {
 export interface StoredModelDiscoveryProfile {
   /** Deployment headers configured on the named route. */
   readonly headers: Readonly<Record<string, string>> | undefined
+  /**
+   * Endpoint the named route resolves when the draft names none — its own
+   * `baseURL`, or else the endpoint the installed catalog serves its models
+   * from. Absent for a route with no endpoint to resolve.
+   */
+  readonly baseURL: string | undefined
+  /** Wire protocol that endpoint publishes its listing under, when the route resolves one. */
+  readonly api: string | undefined
   /** Resolve the named route's credential only when the draft carries none. */
   readonly resolveApiKey: () => Promise<string | undefined>
 }
 
 /**
- * Interrogate one draft provider endpoint for the models it advertises.
+ * Interrogate one provider endpoint for the models it advertises.
  * @param request - the endpoint, protocol, and one-shot credential to use.
- * @param storedProfile - Host-owned headers and lazy credential resolution for
- *   the named route. It is read only on the path that reaches the network; the
- *   credential is resolved only when the draft carries none.
+ * @param storedProfile - Host-owned endpoint, headers, and lazy credential
+ *   resolution for the named route. Its credential resolver is read only on
+ *   the path that reaches the network, and only when the draft carries none.
  * @returns the advertised models in endpoint order.
- * @throws LlmError when the protocol has no readable listing, the endpoint
- *   refuses or fails the request, or the reply is not a model listing.
+ * @throws LlmError when a route the catalog does not describe has no readable
+ *   listing, the endpoint refuses or fails the request, or the reply is not a
+ *   model listing. None of these can fail a route the catalog describes.
  */
 export async function discoverModels(
   request: LlmModelDiscoveryOperation,
   storedProfile?: () => StoredModelDiscoveryProfile | undefined,
 ): Promise<readonly LlmDiscoveredModel[]> {
+  const stored = storedProfile?.()
+  // What the draft states wins over what the named route resolves: a form whose
+  // endpoint was edited but not yet saved must interrogate the edited one.
+  const baseURL = request.baseURL ?? stored?.baseURL
+  // The named route's own protocol, when the Host resolves one, describes the
+  // endpoint it resolved. What is left is a request naming no protocol at all,
+  // which is asked as OpenAI Chat Completions: it is the shape a gateway is
+  // overwhelmingly likely to speak, and the alternative — refusing until the
+  // field is filled — would withhold the action from the case it exists for.
+  // The cost is a misdirected message when the endpoint speaks something else
+  // (an Anthropic gateway answers 401, which reads as a credential problem),
+  // and hand-entry remains the way out.
+  const api = request.api ?? stored?.api ?? 'openai-completions'
   // A catalog route already has its answer, and a better one: the installed
   // entries carry context windows and output caps no listing endpoint reports.
-  if (request.provider !== undefined) {
-    const installed = catalogModels(request.provider)
-    if (installed.size > 0) {
-      return [...installed.values()].map(model => ({
-        id: model.id,
-        name: model.name,
-        contextWindow: model.contextWindow,
-        maxTokens: model.maxTokens,
-      }))
+  const installed = request.provider === undefined ? undefined : catalogModels(request.provider)
+  if (installed !== undefined && installed.size > 0) {
+    const answer = [...installed.values()].map(model => ({
+      id: model.id,
+      name: model.name,
+      contextWindow: model.contextWindow,
+      maxTokens: model.maxTokens,
+    }))
+    // The installed catalog is a snapshot taken when pi-ai was published, so a
+    // route that resolves an endpoint this build can read is asked as well,
+    // and its answer widens the snapshot with whatever the provider added
+    // since. Every way that can fail leaves the snapshot standing: it is a
+    // complete answer about this route, and the endpoint is the enrichment.
+    if (baseURL === undefined || baseURL.length === 0 || !LISTING_PROTOCOLS.includes(api)) return answer
+    try {
+      return widened(answer, await interrogate(baseURL, api, request, stored))
+    } catch (error: unknown) {
+      // Cancellation is the caller's own decision about this operation, not a
+      // fault of the endpoint, and must not be reported as a catalog answer.
+      if (request.signal?.aborted) throw error
+      return answer
     }
   }
-  if (request.baseURL === undefined || request.baseURL.length === 0) {
+  if (baseURL === undefined || baseURL.length === 0) {
     throw new LlmError(
       `pi-ai ships no catalog for provider "${request.provider ?? ''}", so its models can only come from its`
       + " endpoint; set a baseURL, or enter this provider's models by hand",
       'DISCOVERY_FAILED',
     )
   }
-  // A draft that has not chosen a protocol yet is asked as OpenAI Chat
-  // Completions: it is the shape a gateway is overwhelmingly likely to speak,
-  // and the alternative — refusing until the field is filled — would withhold
-  // the action from the case it exists for. The cost is a misdirected message
-  // when the endpoint speaks something else (an Anthropic gateway answers 401,
-  // which reads as a credential problem), and hand-entry remains the way out.
-  const api = request.api ?? 'openai-completions'
-  if (!LISTABLE_PROTOCOLS.has(api)) {
+  if (!LISTING_PROTOCOLS.includes(api)) {
     throw new LlmError(
       `pi-ai protocol "${api}" has no model listing this build can read; enter this provider's models by hand`,
       'DISCOVERY_UNSUPPORTED',
     )
   }
-  const url = listingUrl(request.baseURL, api)
+  return interrogate(baseURL, api, request, stored)
+}
+
+/**
+ * The catalog answer widened by the endpoint's own listing. The catalog keeps
+ * every id it describes — it is the richer metadata — and the endpoint
+ * contributes the ids it serves that the catalog has not caught up with, in
+ * endpoint order.
+ * @param answer - the installed catalog's models.
+ * @param listed - the endpoint's own listing.
+ * @returns the two lists merged by id, catalog entries first.
+ */
+function widened(
+  answer: readonly LlmDiscoveredModel[],
+  listed: readonly LlmDiscoveredModel[],
+): LlmDiscoveredModel[] {
+  const seen = new Set(answer.map(model => model.id))
+  const models = [...answer]
+  for (const model of listed) {
+    if (seen.has(model.id)) continue
+    seen.add(model.id)
+    models.push(model)
+  }
+  return models
+}
+
+/**
+ * Read one endpoint's model listing.
+ * @param baseURL - endpoint the listing is published from.
+ * @param api - wire protocol the endpoint speaks.
+ * @param request - the draft, for its one-shot credential and cancellation.
+ * @param stored - the named route's headers and credential, when one is named.
+ * @returns the listing's models in endpoint order.
+ * @throws LlmError naming the endpoint when it cannot be reached, refuses the
+ *   request, or answers with something other than a model listing.
+ */
+async function interrogate(
+  baseURL: string,
+  api: string,
+  request: LlmModelDiscoveryOperation,
+  stored: StoredModelDiscoveryProfile | undefined,
+): Promise<LlmDiscoveredModel[]> {
+  const url = listingUrl(baseURL, api)
   // A key typed into the form wins: it may replace the stored key that is
-  // failing. The stored profile is asked past the catalog and protocol checks,
-  // and its credential resolver remains lazy so a typed key cannot fail over a
-  // stored credential it supersedes. A route may still authenticate through a
+  // failing. The resolver stays lazy so a typed key cannot fail over a stored
+  // credential it supersedes. A route may still authenticate through a
   // deployment-owned Authorization header when neither key exists.
-  const stored = storedProfile?.()
   const supplied = request.apiKey ?? await stored?.resolveApiKey()
   const apiKey = supplied === undefined ? undefined : usableProbeKey(supplied)
   let response: Response

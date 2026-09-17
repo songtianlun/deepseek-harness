@@ -664,22 +664,24 @@ A provider a surface is still drafting has no route and no catalog, so interroga
 
 ```ts type-equiv
 /**
- * One interrogation of a provider endpoint that configuration has not stored
- * yet. Configuration surfaces send the draft a user is still editing, so the
- * request carries the endpoint and credential directly instead of naming a
- * route: a provider being added has no route to name.
+ * One interrogation of the models a provider serves. Configuration surfaces
+ * send the draft a user is still editing, so the request carries the endpoint
+ * and credential directly instead of naming a route: a provider being added
+ * has no route to name.
  */
 interface LlmModelDiscoveryRequest {
   /**
-   * Route the draft is editing, when it edits an existing one. A route whose
-   * adapter already knows its models answers from that knowledge instead of
-   * asking the endpoint — the adapter's own registry is the better answer, and
-   * it costs no network call.
+   * Route the draft is editing, when it edits an existing one. An adapter that
+   * already knows the route's models answers from that knowledge first — it
+   * carries capacities a listing endpoint does not disclose — and may still
+   * ask the route's own endpoint to widen that answer with the models the
+   * provider has released since the adapter learned them.
    */
   provider?: string
   /**
-   * Endpoint to interrogate. Optional because a route the adapter already
-   * describes needs none; a route it does not must supply one.
+   * Endpoint to interrogate. Optional because an adapter that knows the named
+   * route resolves its own endpoint; a route it does not know must supply one.
+   * A Host may state it for a route the draft names, and a value here wins.
    */
   baseURL?: string
   /** Wire protocol the endpoint speaks, when the draft names one. */

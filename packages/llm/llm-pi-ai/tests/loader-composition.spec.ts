@@ -20,6 +20,7 @@ import LlmRuntime, { createMessage, createUserMessage, userAgent } from '@deepse
 import LocalCredentialProvider from '@deepseek-ai/dsh-credentials-local'
 import FileSettingsProvider from '@deepseek-ai/dsh-settings-file'
 import * as LlmPiAi from '@deepseek-ai/dsh-llm-pi-ai'
+import { getBuiltinModels } from '@earendil-works/pi-ai/providers/all'
 import { assemble } from './assemble.ts'
 import { closeMockServers, mockServer, textEvents } from './mock-server.ts'
 
@@ -157,6 +158,36 @@ describe('llm-pi-ai real dormant composition', () => {
     expect(server.headers[0]?.authorization).toBe('Bearer key-from-store')
     expect(server.headers[0]?.accept).toBe('application/json')
     expect(server.headers[0]?.['user-agent']).toBe(userAgent())
+  })
+
+  it('widens a catalog route with the endpoint its settings resolve', async () => {
+    vi.stubEnv('PI_COMPOSITION_KEY', '')
+    const server = await mockServer([{ body: JSON.stringify({ data: [{ id: 'released-since' }] }) }])
+    const { ctx, settingsPath } = await loadComposition()
+    const [installed] = getBuiltinModels('deepseek')
+    if (installed === undefined) throw new Error('the installed catalog ships no deepseek model')
+
+    // Repointing a catalog route at another endpoint keeps it a catalog route,
+    // so the request names only the route and the Host must resolve the rest:
+    // the endpoint its profile pins and the credential its reference names.
+    await writeFile(settingsPath, [
+      'llm-pi-ai:',
+      '  providers:',
+      '    deepseek:',
+      '      apiKeyEnv: PI_COMPOSITION_KEY',
+      `      baseURL: ${server.url}`,
+      '',
+    ].join('\n'))
+    await vi.waitFor(() => {
+      expect(ctx.llm.listProviders().map(provider => provider.id)).toEqual(['deepseek'])
+    }, { timeout: 5000 })
+
+    const models = await ctx.llm.discoverModels('llm-pi-ai', { provider: 'deepseek' })
+
+    expect(server.paths).toEqual(['/models'])
+    expect(server.headers[0]?.authorization).toBe('Bearer key-from-store')
+    expect(models.map(model => model.id)).toContain('released-since')
+    expect(models.find(model => model.id === installed.id)?.contextWindow).toBe(installed.contextWindow)
   })
 
   it('continues natively after max-token assembly drops a tool call, with pruned replay metadata', async () => {

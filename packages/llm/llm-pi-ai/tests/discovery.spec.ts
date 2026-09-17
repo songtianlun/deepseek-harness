@@ -74,23 +74,143 @@ async function harness(): Promise<Context> {
 }
 
 describe('catalog-route model discovery', () => {
-  it('answers from the installed registry, with capacities and no network call', async () => {
-    const server = await listingServer({ body: JSON.stringify({ data: [{ id: 'from-the-endpoint' }] }) })
+  it("widens the installed registry with the endpoint's own listing", async () => {
+    const server = await listingServer({
+      body: JSON.stringify({
+        data: [
+          { id: 'from-the-endpoint' },
+          // The catalog already describes this one with capacities the listing
+          // does not disclose, so the catalog's entry must survive.
+          { id: 'deepseek-v4-pro' },
+        ],
+      }),
+    })
     const ctx = await harness()
 
     const models = await ctx.llm.discoverModels('llm-pi-ai', { provider: 'deepseek', baseURL: server.url })
 
-    // pi-ai's own registry is the authority for its own providers, and it
-    // carries what a listing endpoint would not disclose.
+    const catalog = getBuiltinModels('deepseek')
     expect(models.map(model => model.id).sort())
-      .toEqual(getBuiltinModels('deepseek').map(model => model.id).sort())
-    expect(models.every(model => (model.contextWindow ?? 0) > 0 && (model.maxTokens ?? 0) > 0)).toBe(true)
-    expect(server.paths).toEqual([])
+      .toEqual([...catalog.map(model => model.id), 'from-the-endpoint'].sort())
+    const fromCatalog = models.find(model => model.id === 'deepseek-v4-pro')
+    const installed = catalog.find(model => model.id === 'deepseek-v4-pro')
+    expect(fromCatalog?.name).toBe(installed?.name)
+    expect(fromCatalog?.contextWindow).toBe(installed?.contextWindow)
+    expect(fromCatalog?.maxTokens).toBe(installed?.maxTokens)
+    expect(server.paths).toEqual(['/models'])
   })
 
   it('needs no endpoint for a route the catalog describes', async () => {
     const ctx = await harness()
     await expect(ctx.llm.discoverModels('llm-pi-ai', { provider: 'deepseek' })).resolves.not.toHaveLength(0)
+  })
+
+  it('leaves a route whose models share no listable endpoint at the catalog answer', async () => {
+    const ctx = new Context()
+    await ctx.plugin(LlmRuntime)
+    // Bedrock's models span regional endpoints under a protocol this build
+    // cannot list, so there is no one endpoint to ask and nothing is asked.
+    await ctx.plugin(LlmPiAi, { providers: { 'amazon-bedrock': {} } })
+
+    await expect(ctx.llm.discoverModels('llm-pi-ai', { provider: 'amazon-bedrock' }))
+      .resolves.toEqual(getBuiltinModels('amazon-bedrock').map(model => ({
+        id: model.id,
+        name: model.name,
+        contextWindow: model.contextWindow,
+        maxTokens: model.maxTokens,
+      })))
+  })
+
+  it('answers a catalog route whose stored profile no longer resolves', async () => {
+    const ctx = new Context()
+    await ctx.plugin(LlmRuntime)
+    // An override beside a models list is refused, which leaves the route
+    // unserviceable in the directory; its catalog still answers while a person
+    // repairs the profile.
+    await ctx.plugin(LlmPiAi, {
+      providers: {
+        deepseek: {
+          models: [{ id: 'deepseek-v4-pro' }],
+          modelOverrides: { 'deepseek-v4-flash': { contextWindow: 4096 } },
+        },
+      },
+    })
+
+    await expect(ctx.llm.discoverModels('llm-pi-ai', { provider: 'deepseek' }))
+      .resolves.toEqual(getBuiltinModels('deepseek').map(model => ({
+        id: model.id,
+        name: model.name,
+        contextWindow: model.contextWindow,
+        maxTokens: model.maxTokens,
+      })))
+  })
+
+  it("keeps the catalog answer when the route's endpoint refuses it", async () => {
+    const server = await listingServer({ status: 500, body: '{"error":"boom"}' })
+    const ctx = await harness()
+
+    // The catalog answer is already complete for this route, so a broken
+    // endpoint costs the widening rather than the whole answer.
+    await expect(ctx.llm.discoverModels('llm-pi-ai', { provider: 'deepseek', baseURL: server.url }))
+      .resolves.toEqual(getBuiltinModels('deepseek').map(model => ({
+        id: model.id,
+        name: model.name,
+        contextWindow: model.contextWindow,
+        maxTokens: model.maxTokens,
+      })))
+    expect(server.paths).toEqual(['/models'])
+  })
+
+  it('keeps the catalog answer for a protocol whose listing this build cannot read', async () => {
+    const server = await listingServer({ body: JSON.stringify({ data: [{ id: 'from-the-endpoint' }] }) })
+    const ctx = await harness()
+
+    // A draft route is told this build cannot interrogate the protocol; a
+    // catalog route already has its answer and simply is not widened.
+    await expect(ctx.llm.discoverModels('llm-pi-ai', {
+      provider: 'deepseek',
+      baseURL: server.url,
+      api: 'google-generative-ai',
+    })).resolves.toEqual(getBuiltinModels('deepseek').map(model => ({
+      id: model.id,
+      name: model.name,
+      contextWindow: model.contextWindow,
+      maxTokens: model.maxTokens,
+    })))
+    expect(server.paths).toEqual([])
+  })
+
+  it('asks the endpoint a configured route resolves, with its stored credential', async () => {
+    const server = await listingServer({ body: JSON.stringify({ data: [{ id: 'from-the-endpoint' }] }) })
+    const ctx = new Context()
+    await ctx.plugin(LlmRuntime)
+    process.env['ACME_CATALOG_KEY'] = 'stored-key'
+    touchedEnv.push('ACME_CATALOG_KEY')
+    // A catalog route whose profile repoints it at this server: the request
+    // names the route and nothing else, so the endpoint can only come from the
+    // Host resolving what the route serves.
+    await ctx.plugin(LlmPiAi, {
+      providers: { deepseek: { apiKeyEnv: 'ACME_CATALOG_KEY', baseURL: server.url } },
+    })
+
+    const models = await ctx.llm.discoverModels('llm-pi-ai', { provider: 'deepseek' })
+
+    expect(server.paths).toEqual(['/models'])
+    expect(server.headers[0]?.authorization).toBe('Bearer stored-key')
+    expect(models.map(model => model.id)).toContain('from-the-endpoint')
+  })
+
+  it('reports cancellation of a widening interrogation as an abort', async () => {
+    const server = await listingServer({ body: JSON.stringify({ data: [{ id: 'from-the-endpoint' }] }) })
+    const ctx = await harness()
+
+    // Cancellation is the caller's decision about the operation, not a fault
+    // of the endpoint, so it must not be answered as the catalog.
+    await expect(ctx.llm.discoverModels(
+      'llm-pi-ai',
+      { provider: 'deepseek', baseURL: server.url },
+      AbortSignal.abort('test cancellation'),
+    )).rejects.toMatchObject({ code: 'ABORTED' })
   })
 
   it('says where a route the catalog does not describe must get its models', async () => {
@@ -289,10 +409,11 @@ describe('draft-provider model discovery', () => {
       .toEqual(['private-tenant', 'private-tenant', undefined, undefined])
   })
 
-  it('leaves a catalog route\'s credential unresolved, having never reached the network', async () => {
-    // The catalog answers before any endpoint is asked, so a route whose
-    // profile names a credential that is not set must still answer rather than
-    // failing over a key the interrogation never needed.
+  it("keeps the catalog answer when the route's credential will not resolve", async () => {
+    // The catalog answer is complete on its own, so a route whose profile names
+    // a credential that is not set still answers: what a missing key costs is
+    // the widening, not the answer. No request is built either, so this needs
+    // no endpoint to answer.
     const ctx = new Context()
     await ctx.plugin(LlmRuntime)
     Reflect.deleteProperty(process.env, 'ABSENT_FOR_DISCOVERY')
@@ -539,5 +660,26 @@ describe('recorded provider listings', () => {
     const ctx = await harness()
 
     await expect(ctx.llm.discoverModels('llm-pi-ai', { baseURL: server.url, api })).resolves.toEqual(models)
+  })
+
+  it('widens a catalog route with what its endpoint serves today', async () => {
+    // The reply `opencode-go` published on 2026-09-17, replayed against the
+    // route: two of its ids are newer than pi-ai 0.85.1's catalog for that
+    // route, and the third is one the catalog already describes.
+    const body = await readFile(
+      new URL('./fixtures/model-listings/opencode-go-2026-09-17.json', import.meta.url),
+      'utf8',
+    )
+    const server = await listingServer({ body })
+    const ctx = await harness()
+
+    const models = await ctx.llm.discoverModels('llm-pi-ai', { provider: 'opencode-go', baseURL: server.url })
+
+    const catalog = getBuiltinModels('opencode-go')
+    expect(catalog.map(model => model.id)).not.toContain('deepseek-v4.1-flash')
+    expect(models.map(model => model.id)).toEqual([...catalog.map(model => model.id), 'deepseek-v4.1-flash', 'minimax-m2.5'])
+    // The catalog's own entry keeps the capacities the listing does not carry.
+    const known = models.find(model => model.id === 'deepseek-v4-flash')
+    expect(known?.contextWindow).toBe(catalog.find(model => model.id === 'deepseek-v4-flash')?.contextWindow)
   })
 })

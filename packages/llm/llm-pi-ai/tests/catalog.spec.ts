@@ -12,6 +12,7 @@ import { getBuiltinModels } from '@earendil-works/pi-ai/providers/all'
 import { createModels, getSupportedThinkingLevels } from '@earendil-works/pi-ai'
 import type { Api, Model, OpenAICompletionsCompat, Provider } from '@earendil-works/pi-ai'
 import { resolveProfiles } from '../src/config.ts'
+import { modelEndpoints } from '../src/catalog.ts'
 import { buildProvider, supportedProtocols } from '../src/provider.ts'
 import { assemble } from './assemble.ts'
 import { memoryAuth } from './auth-double.ts'
@@ -1238,5 +1239,30 @@ describe('configurable-provider directory', () => {
       settingsPath: ['providers', 'openai-codex'],
       declared: false,
     })
+  })
+})
+
+describe('model endpoints', () => {
+  it("answers with the endpoint a protocol's models agree on", () => {
+    // `opencode-go` ships no provider-level endpoint: each model names its own,
+    // and the protocols disagree with each other rather than within one.
+    expect([...modelEndpoints(getBuiltinModels('opencode-go'))]).toEqual([
+      ['anthropic-messages', 'https://opencode.ai/zen/go'],
+      ['openai-completions', 'https://opencode.ai/zen/go/v1'],
+      ['openai-responses', 'https://opencode.ai/zen/go/v1'],
+    ])
+    // Models that all share one endpoint resolve it for their one protocol.
+    expect([...modelEndpoints(getBuiltinModels('deepseek'))])
+      .toEqual([['openai-completions', 'https://api.deepseek.com']])
+  })
+
+  it('withholds a protocol whose models name different endpoints', () => {
+    // Bedrock's models span regional endpoints, so "this route's endpoint" has
+    // no single answer under its one protocol and the map carries none.
+    expect(modelEndpoints(getBuiltinModels('amazon-bedrock')).has('bedrock-converse-stream')).toBe(false)
+  })
+
+  it('answers nothing for no models', () => {
+    expect(modelEndpoints([]).size).toBe(0)
   })
 })

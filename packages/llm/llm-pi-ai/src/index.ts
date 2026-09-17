@@ -64,10 +64,10 @@ import type {} from '@deepseek-ai/dsh-settings'
 import { deepEqualJson } from '@deepseek-ai/dsh-util-values'
 import { PiAiAdapter } from './adapter.ts'
 import { authContextFrom, credentialStoreFrom } from './auth.ts'
-import { catalogProviderIds } from './catalog.ts'
+import { catalogProviderIds, modelEndpoints } from './catalog.ts'
 import { assertServiceable, Config, resolveProfiles } from './config.ts'
 import type { ResolvedPiAiProviderProfile } from './config.ts'
-import { discoverModels } from './discovery.ts'
+import { discoverModels, LISTING_PROTOCOLS } from './discovery.ts'
 import type { StoredModelDiscoveryProfile } from './discovery.ts'
 import { registerPiAiFlows } from './login.ts'
 
@@ -139,6 +139,27 @@ function directoryEntries(
   for (const provider of catalog) declare(provider, provider)
   for (const [provider, profile] of profiles) declare(provider, profile.displayName, profile.catalogError)
   return [...entries.values()]
+}
+
+/**
+ * The endpoint and wire protocol a configured route's own model listing is
+ * read from: the endpoint its resolved models are served from, under the
+ * protocol the profile states or the preferred one they speak. A route whose
+ * models of a protocol name different endpoints, or that resolves no protocol
+ * this build can read, has none.
+ * @param profile - the route's resolved profile.
+ * @returns the route's listing endpoint and protocol, or nothing when it resolves neither.
+ */
+function listingTarget(
+  profile: ResolvedPiAiProviderProfile,
+): { baseURL: string; api: string } | undefined {
+  const endpoints = modelEndpoints(profile.piProvider?.getModels() ?? [])
+  const candidates = profile.api === undefined ? LISTING_PROTOCOLS : [profile.api]
+  for (const api of candidates) {
+    const baseURL = endpoints.get(api)
+    if (baseURL !== undefined) return { baseURL, api }
+  }
+  return undefined
 }
 
 /** Register one generic pi-ai adapter for all configured provider routes. */
@@ -246,17 +267,23 @@ export function apply(ctx: Context, config: Config): void {
     if (provider === undefined) return undefined
     const profile = profiles().get(provider)
     if (profile === undefined) return undefined
+    const target = listingTarget(profile)
     return {
       headers: profile.headers,
+      baseURL: target?.baseURL,
+      api: target?.api,
       resolveApiKey: () => resolveApiKey(provider, profile),
     }
   }
   // Interrogating an endpoint is a configuration-time action over a draft, so
   // it is offered for the whole namespace rather than per route: the provider
   // a surface is adding does not exist yet. The draft is the whole request
-  // except the stored credential and deployment-owned headers: the curated UI
-  // accepts neither, so an already-configured route supplies both inside the
-  // Host rather than widening the discovery request.
+  // except what only the Host can supply for an already-configured route: its
+  // endpoint and protocol, its stored credential, and its deployment-owned
+  // headers. The curated UI edits the first pair but holds a draft, so it may
+  // omit all four; the credential is write-only and it cannot edit headers at
+  // all, so those two could not be reconstructed from that page even in
+  // principle.
   ctx.llm.registerModelDiscovery(NS, (request, signal) => discoverModels(
     { ...request, ...signal === undefined ? {} : { signal } },
     () => storedDiscoveryProfile(request.provider),

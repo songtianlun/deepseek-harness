@@ -1,0 +1,23 @@
+{
+  "object": "list",
+  "data": [
+    {
+      "id": "deepseek-v4.1-flash",
+      "object": "model",
+      "created": 1789652170,
+      "owned_by": "opencode"
+    },
+    {
+      "id": "deepseek-v4-flash",
+      "object": "model",
+      "created": 1789652170,
+      "owned_by": "opencode"
+    },
+    {
+      "id": "minimax-m2.5",
+      "object": "model",
+      "created": 1789652170,
+      "owned_by": "opencode"
+    }
+  ]
+}
